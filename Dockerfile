@@ -6,7 +6,7 @@ RUN npm install --ignore-scripts
 COPY . .
 RUN npx gulp build
 
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -15,7 +15,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libpq-dev gcc && \
+    libpq-dev default-libmysqlclient-dev pkg-config gcc && \
     rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
@@ -25,6 +25,8 @@ COPY . .
 COPY --from=assets /build/babybuddy/static/babybuddy/ /app/babybuddy/static/babybuddy/
 
 RUN python manage.py collectstatic --noinput
+
+VOLUME ["/app/data", "/app/media"]
 
 EXPOSE 80
 
