@@ -4,3 +4,9 @@ data
 *.tar
 *.tar.gz
 .git
+.venv
+.kiro_tmp
+.vscode
+__pycache__
+*.pyc
+terraform
