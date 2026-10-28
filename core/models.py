@@ -3,7 +3,7 @@ import datetime
 import re
 
 from django.core.cache import cache
-from django.core.exceptions import ValidationError
+from django.core.exceptions import PermissionDenied, ValidationError
 from django.core.validators import RegexValidator
 from django.db import models
 from django.db.models.functions import Lower
@@ -15,7 +15,7 @@ from django.utils.translation import gettext_lazy as _
 from taggit.managers import TaggableManager as TaggitTaggableManager
 from taggit.models import GenericTaggedItemBase, TagBase
 
-from babybuddy.site_settings import NapSettings
+from babybuddy.site_settings import NapSettings, FeedingSettings
 from core.utils import random_color, timezone_aware_duration
 
 
@@ -121,6 +121,16 @@ class Tag(TagBase):
         ordering = [Lower("name")]
         verbose_name = _("Tag")
         verbose_name_plural = _("Tags")
+
+    @classmethod
+    def check_assignment_permissions(cls, user, names, current=()):
+        if set(names) == set(current):
+            return
+        if user is None or not user.has_perm("core.change_tag"):
+            raise PermissionDenied(_("You do not have permission to change tags."))
+        existing = cls.objects.filter(name__in=names).values_list("name", flat=True)
+        if set(names) - set(existing) and not user.has_perm("core.add_tag"):
+            raise PermissionDenied(_("You do not have permission to create tags."))
 
     @property
     def complementary_color(self):
@@ -264,7 +274,11 @@ class DiaperChange(models.Model):
         choices=[
             ("black", _("Black")),
             ("brown", _("Brown")),
+            ("gray", _("Gray")),
             ("green", _("Green")),
+            ("orange", _("Orange")),
+            ("red", _("Red")),
+            ("white", _("White")),
             ("yellow", _("Yellow")),
         ],
         max_length=255,
@@ -344,6 +358,8 @@ class Feeding(models.Model):
     amount = models.FloatField(blank=True, null=True, verbose_name=_("Amount"))
     notes = models.TextField(blank=True, null=True, verbose_name=_("Notes"))
     tags = TaggableManager(blank=True, through=Tagged)
+
+    settings = FeedingSettings()
 
     objects = models.Manager()
 
@@ -677,6 +693,13 @@ class Timer(models.Model):
         """Stop (delete) the timer."""
         self.delete()
 
+    def can_be_consumed_by(self, user):
+        """
+        Check if a user may convert the timer into an entry. Doing so deletes the
+        timer, so it requires `core.delete_timer` unless the user owns the timer.
+        """
+        return self.user_id == user.pk or user.has_perm("core.delete_timer")
+
     def save(self, *args, **kwargs):
         self.name = self.name or None
         super(Timer, self).save(*args, **kwargs)
@@ -708,6 +731,7 @@ class TummyTime(models.Model):
     milestone = models.CharField(
         blank=True, max_length=255, verbose_name=_("Milestone")
     )
+    notes = models.TextField(blank=True, null=True, verbose_name=_("Notes"))
     tags = TaggableManager(blank=True, through=Tagged)
 
     objects = models.Manager()
@@ -761,6 +785,96 @@ class Weight(models.Model):
 
     def clean(self):
         validate_date(self.date, "date")
+
+
+class Medication(models.Model):
+    model_name = "medication"
+
+    child = models.ForeignKey(
+        "Child",
+        on_delete=models.CASCADE,
+        related_name="medication",
+        verbose_name=_("Child"),
+        blank=False,
+        null=False,
+    )
+    name = models.CharField(
+        max_length=255,
+        blank=False,
+        null=False,
+        verbose_name=_("Medication Name"),
+        help_text=_("Name of the medication administered"),
+        db_index=True,
+    )
+    dosage = models.FloatField(
+        blank=True,
+        null=True,
+        verbose_name=_("Dosage"),
+        help_text=_("Amount of medication given"),
+    )
+    dosage_unit = models.CharField(
+        max_length=20,
+        choices=[
+            ("mg", _("MG")),
+            ("ml", _("ML")),
+            ("tablets", _("Tablets")),
+            ("drops", _("Drops")),
+        ],
+        blank=True,
+        null=False,
+        default="",
+        verbose_name=_("Dosage Unit"),
+    )
+    time = models.DateTimeField(
+        blank=False,
+        default=timezone.localtime,
+        null=False,
+        verbose_name=_("Time Taken"),
+        db_index=True,
+    )
+    next_dose_interval = models.DurationField(
+        blank=True,
+        null=True,
+        verbose_name=_("Next Dose Interval"),
+        help_text=_("Time until next dose can be given"),
+    )
+    notes = models.TextField(blank=True, null=True, verbose_name=_("Notes"))
+    tags = TaggableManager(blank=True, through=Tagged)
+
+    objects = models.Manager()
+
+    class Meta:
+        ordering = ["-time"]
+        verbose_name = _("Medication")
+        verbose_name_plural = _("Medications")
+        default_permissions = ("view", "add", "change", "delete")
+
+    @property
+    def next_dose_time(self):
+        """
+        Calculate when the next dose can be given based on the time this dose
+        was administered and the configured interval.
+        :returns: a DateTime instance or None if no interval is set.
+        """
+        if self.next_dose_interval:
+            return self.time + self.next_dose_interval
+        return None
+
+    @property
+    def next_dose_ready(self):
+        """
+        Whether the next dose can be given (current time >= next_dose_time).
+        :returns: True if next dose is ready, False otherwise, None if no interval set.
+        """
+        if self.next_dose_time:
+            return timezone.now() >= self.next_dose_time
+        return None
+
+    def clean(self):
+        validate_time(self.time, "time")
+
+    def __str__(self):
+        return str(_("Medication"))
 
 
 class WeightPercentile(models.Model):

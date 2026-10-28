@@ -1,3 +1,4 @@
+import json
 import os
 import dj_database_url
 
@@ -75,6 +76,7 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
+    "babybuddy.middleware.AccessExpiry",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "axes.middleware.AxesMiddleware",
 ]
@@ -127,7 +129,7 @@ else:
     if os.getenv("DB_PORT"):
         config["PORT"] = os.getenv("DB_PORT")
     if os.getenv("DB_OPTIONS"):
-        config["OPTIONS"] = os.getenv("DB_OPTIONS")
+        config["OPTIONS"] = json.loads(os.getenv("DB_OPTIONS", "{}"))
     DATABASES = {"default": config}
 
 
@@ -195,6 +197,8 @@ LANGUAGES = [
     ("hr", _("Croatian")),
     ("cs", _("Czech")),
     ("zh-hans", _("Chinese (simplified)")),
+    ("zh-hant", _("Chinese (traditional)")),
+    ("zh-tw", _("Chinese (Taiwan)")),
     ("da", _("Danish")),
     ("nl", _("Dutch")),
     ("en-US", _("English (US)")),
@@ -205,6 +209,7 @@ LANGUAGES = [
     ("he", _("Hebrew")),
     ("hu", _("Hungarian")),
     ("it", _("Italian")),
+    ("ko", _("Korean")),
     ("ja", _("Japanese")),
     ("nb", _("Norwegian Bokmål")),
     ("pl", _("Polish")),
@@ -341,7 +346,7 @@ if os.environ.get("CORS_ALLOWED_ORIGINS"):
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
         "rest_framework.authentication.SessionAuthentication",
-        "rest_framework.authentication.TokenAuthentication",
+        "api.authentication.TokenAuthentication",
     ],
     "DEFAULT_FILTER_BACKENDS": [
         "django_filters.rest_framework.DjangoFilterBackend",
@@ -372,6 +377,10 @@ AXES_COOLOFF_TIME = 1
 
 AXES_FAILURE_LIMIT = 5
 
+# `None` makes Axes use the default precedence order set by django-ipware.
+# See: https://github.com/un33k/django-ipware#precedence-order
+AXES_IPWARE_META_PRECEDENCE_ORDER = None
+
 AXES_LOCKOUT_TEMPLATE = "error/lockout.html"
 
 AXES_LOCKOUT_URL = "/login/lock"
@@ -393,6 +402,7 @@ DEFAULT_AUTO_FIELD = "django.db.models.AutoField"
 BABY_BUDDY = {
     "ALLOW_UPLOADS": bool(strtobool(os.environ.get("ALLOW_UPLOADS") or "True")),
     "READ_ONLY_GROUP_NAME": "read_only",
+    "CAREGIVER_GROUP_NAME": "caregiver",
 }
 
 # Home assistant specific configuration

@@ -1,14 +1,17 @@
 # -*- coding: utf-8 -*-
 import datetime
+import io
+import tempfile
 
 from django.contrib.auth import get_user_model
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.test import Client as HttpClient
 from django.utils import timezone
 from django.utils.formats import get_format, reset_format_cache
-
 from faker import Faker
+from PIL import Image
 
 from core import models
 
@@ -50,6 +53,16 @@ class FormsTestCaseBase(TestCase):
         reset_format_cache()
         datetime_format = get_format("DATETIME_INPUT_FORMATS")[0]
         return timezone.localtime(datetime).strftime(datetime_format)
+
+    @staticmethod
+    def image_upload(name="test.png", image_format="PNG"):
+        file = io.BytesIO()
+        Image.new("RGB", (10, 10), "blue").save(file, format=image_format)
+        return SimpleUploadedFile(name, file.getvalue(), content_type="image/png")
+
+    @staticmethod
+    def invalid_image_upload(name="test.txt"):
+        return SimpleUploadedFile(name, b"not an image", content_type="text/plain")
 
 
 class InitialValuesTestCase(FormsTestCaseBase):
@@ -134,6 +147,43 @@ class InitialValuesTestCase(FormsTestCaseBase):
         self.assertTrue("start" not in page.context["form"].initial)
         self.assertTrue("end" not in page.context["form"].initial)
 
+    def test_timer_name_set_from_timer(self):
+        timer = models.Timer.objects.create(
+            user=self.user,
+            name="Timer Test",
+            start=timezone.localtime() - timezone.timedelta(minutes=30),
+        )
+
+        page = self.c.get("/sleep/add/?timer={}".format(timer.id))
+        self.assertEqual(page.context["form"].initial["timer"], "Timer Test")
+        self.assertEqual(page.context["form"].fields["timer"].label, "Timer")
+        self.assertContains(page, 'id="id_timer"')
+        self.assertContains(page, 'value="Timer Test"')
+
+    def test_timer_name_placed_after_child(self):
+        timer = models.Timer.objects.create(
+            user=self.user,
+            name="Timer Test",
+            start=timezone.localtime() - timezone.timedelta(minutes=30),
+        )
+
+        page = self.c.get("/sleep/add/?timer={}".format(timer.id))
+        field_names = list(page.context["form"].fields)
+        self.assertEqual(field_names.index("timer"), field_names.index("child") + 1)
+
+    def test_timer_name_not_set_without_timer(self):
+        page = self.c.get("/sleep/add/")
+        self.assertNotIn("timer", page.context["form"].fields)
+
+    def test_timer_name_not_set_from_invalid_timer(self):
+        page = self.c.get("/sleep/add/?timer={}".format(42))
+        self.assertNotIn("timer", page.context["form"].fields)
+
+    def test_timer_name_not_set_from_non_numeric_timer(self):
+        page = self.c.get("/sleep/add/?timer=not-a-number")
+        self.assertEqual(page.status_code, 200)
+        self.assertNotIn("timer", page.context["form"].fields)
+
 
 class BMIFormsTestCase(FormsTestCaseBase):
     @classmethod
@@ -191,6 +241,39 @@ class ChildFormsTestCase(FormsTestCaseBase):
         page = self.c.post("/children/add/", params, follow=True)
         self.assertEqual(page.status_code, 200)
         self.assertContains(page, "Child entry added")
+
+    def test_add_with_picture(self):
+        params = {
+            "first_name": "Child",
+            "last_name": "Two",
+            "birth_date": timezone.localdate(),
+            "picture": self.image_upload(),
+        }
+        with tempfile.TemporaryDirectory() as media_root, override_settings(
+            MEDIA_ROOT=media_root
+        ):
+            page = self.c.post("/children/add/", params, follow=True)
+            self.assertEqual(page.status_code, 200)
+            child = models.Child.objects.get(first_name="Child", last_name="Two")
+            self.assertTrue(child.picture.name.startswith("child/picture/"))
+            self.assertContains(page, "Child entry added")
+
+    def test_add_rejects_invalid_picture(self):
+        params = {
+            "first_name": "Child",
+            "last_name": "Two",
+            "birth_date": timezone.localdate(),
+            "picture": self.invalid_image_upload(),
+        }
+        with tempfile.TemporaryDirectory() as media_root, override_settings(
+            MEDIA_ROOT=media_root
+        ):
+            page = self.c.post("/children/add/", params)
+            self.assertEqual(page.status_code, 200)
+            self.assertIn(
+                "Upload a valid image",
+                page.context["form"].errors["picture"][0],
+            )
 
     def test_edit(self):
         params = {
@@ -465,6 +548,38 @@ class NoteFormsTestCase(FormsTestCaseBase):
         page = self.c.post("/notes/add/", params, follow=True)
         self.assertEqual(page.status_code, 200)
         self.assertContains(page, "Note entry for {} added".format(str(self.child)))
+
+    def test_add_with_image(self):
+        params = {
+            "child": self.child.id,
+            "note": "New note",
+            "image": self.image_upload(),
+            "time": self.localtime_string(),
+        }
+        with tempfile.TemporaryDirectory() as media_root, override_settings(
+            MEDIA_ROOT=media_root
+        ):
+            page = self.c.post("/notes/add/", params, follow=True)
+            self.assertEqual(page.status_code, 200)
+            note = models.Note.objects.exclude(image="").latest("id")
+            self.assertTrue(note.image.name.startswith("notes/images/"))
+            self.assertContains(page, "Note entry for {} added".format(str(self.child)))
+
+    def test_add_rejects_invalid_image(self):
+        params = {
+            "child": self.child.id,
+            "note": "New note",
+            "image": self.invalid_image_upload(),
+            "time": self.localtime_string(),
+        }
+        with tempfile.TemporaryDirectory() as media_root, override_settings(
+            MEDIA_ROOT=media_root
+        ):
+            page = self.c.post("/notes/add/", params)
+            self.assertEqual(page.status_code, 200)
+            self.assertIn(
+                "Upload a valid image", page.context["form"].errors["image"][0]
+            )
 
     def test_edit(self):
         params = {
@@ -769,11 +884,13 @@ class TummyTimeFormsTestCase(FormsTestCaseBase):
             "start": self.localtime_string(start),
             "end": self.localtime_string(end),
             "milestone": "Moved head!",
+            "notes": "Seemed to enjoy it.",
         }
         page = self.c.post("/tummy-time/{}/".format(self.tt.id), params, follow=True)
         self.assertEqual(page.status_code, 200)
         self.tt.refresh_from_db()
         self.assertEqual(self.tt.milestone, params["milestone"])
+        self.assertEqual(self.tt.notes, params["notes"])
         self.assertContains(
             page, "Tummy Time entry for {} updated".format(str(self.tt.child))
         )
@@ -811,6 +928,18 @@ class TimerFormsTestCase(FormsTestCaseBase):
         self.assertContains(page, params["name"])
         self.timer.refresh_from_db()
         self.assertEqual(self.localtime_string(self.timer.start), params["start"])
+
+    def test_edit_without_child_message(self):
+        timer = models.Timer.objects.create(user=self.user)
+        params = {
+            "child": "",
+            "name": "Childless Timer",
+            "start": self.localtime_string(timer.start),
+        }
+        page = self.c.post("/timers/{}/edit/".format(timer.id), params, follow=True)
+        self.assertEqual(page.status_code, 200)
+        self.assertNotContains(page, "Timer entry for None updated.")
+        self.assertContains(page, "Timer entry updated.")
 
 
 class ValidationsTestCase(FormsTestCaseBase):
@@ -937,3 +1066,161 @@ class WeightFormsTestCase(FormsTestCaseBase):
         page = self.c.post("/weight/{}/delete/".format(self.weight.id), follow=True)
         self.assertEqual(page.status_code, 200)
         self.assertContains(page, "Weight entry deleted")
+
+
+class MedicationFormsTestCase(FormsTestCaseBase):
+    @classmethod
+    def setUpClass(cls):
+        super(MedicationFormsTestCase, cls).setUpClass()
+        cls.medication = models.Medication.objects.create(
+            child=cls.child,
+            name="Tylenol",
+            dosage=5.0,
+            dosage_unit="ml",
+            time=timezone.localtime() - timezone.timedelta(hours=2),
+            next_dose_interval=timezone.timedelta(hours=4),
+            notes="Test medication",
+        )
+
+    def test_add(self):
+        params = {
+            "child": self.child.id,
+            "name": "Ibuprofen",
+            "dosage": "2.5",
+            "dosage_unit": "ml",
+            "time": self.localtime_string(),
+            "next_dose_interval": "4",
+            "notes": "New medication entry",
+        }
+
+        page = self.c.post("/medication/add/", params, follow=True)
+        self.assertEqual(page.status_code, 200)
+        self.assertContains(
+            page, "Medication entry for {} added".format(str(self.child))
+        )
+
+    def test_add_without_interval(self):
+        params = {
+            "child": self.child.id,
+            "name": "Vitamin D",
+            "dosage": "1",
+            "dosage_unit": "drops",
+            "time": self.localtime_string(),
+            "notes": "Daily vitamin",
+        }
+
+        page = self.c.post("/medication/add/", params, follow=True)
+        self.assertEqual(page.status_code, 200)
+        self.assertContains(
+            page, "Medication entry for {} added".format(str(self.child))
+        )
+
+    def test_add_with_tags(self):
+        params = {
+            "child": self.child.id,
+            "name": "Acetaminophen",
+            "dosage": "3.0",
+            "dosage_unit": "ml",
+            "time": self.localtime_string(),
+            "next_dose_interval": "6",
+            "tags": "fever,pain",
+        }
+
+        page = self.c.post("/medication/add/", params, follow=True)
+        self.assertEqual(page.status_code, 200)
+        self.assertContains(
+            page, "Medication entry for {} added".format(str(self.child))
+        )
+
+    def test_edit(self):
+        params = {
+            "child": self.medication.child.id,
+            "name": self.medication.name,
+            "dosage": self.medication.dosage + 1.0,
+            "dosage_unit": self.medication.dosage_unit,
+            "time": self.localtime_string(self.medication.time),
+            "next_dose_interval": "8",
+            "notes": "Updated medication entry",
+        }
+        page = self.c.post(
+            "/medication/{}/".format(self.medication.id), params, follow=True
+        )
+        self.assertEqual(page.status_code, 200)
+        self.medication.refresh_from_db()
+        self.assertEqual(self.medication.dosage, params["dosage"])
+        self.assertEqual(self.medication.notes, params["notes"])
+        self.assertContains(
+            page, "Medication entry for {} updated".format(str(self.medication.child))
+        )
+
+    def test_edit_change_interval(self):
+        params = {
+            "child": self.medication.child.id,
+            "name": self.medication.name,
+            "dosage": self.medication.dosage,
+            "dosage_unit": self.medication.dosage_unit,
+            "time": self.localtime_string(self.medication.time),
+            "next_dose_interval": "12",
+            "notes": self.medication.notes,
+        }
+        page = self.c.post(
+            "/medication/{}/".format(self.medication.id), params, follow=True
+        )
+        self.assertEqual(page.status_code, 200)
+        self.medication.refresh_from_db()
+        self.assertContains(
+            page, "Medication entry for {} updated".format(str(self.medication.child))
+        )
+
+    def test_edit_remove_interval(self):
+        params = {
+            "child": self.medication.child.id,
+            "name": self.medication.name,
+            "dosage": self.medication.dosage,
+            "dosage_unit": self.medication.dosage_unit,
+            "time": self.localtime_string(self.medication.time),
+            "notes": self.medication.notes,
+        }
+        page = self.c.post(
+            "/medication/{}/".format(self.medication.id), params, follow=True
+        )
+        self.assertEqual(page.status_code, 200)
+        self.medication.refresh_from_db()
+        self.assertIsNone(self.medication.next_dose_interval)
+
+    def test_delete(self):
+        page = self.c.post(
+            "/medication/{}/delete/".format(self.medication.id), follow=True
+        )
+        self.assertEqual(page.status_code, 200)
+        self.assertContains(page, "Medication entry deleted")
+
+    def test_form_without_dosage(self):
+        # Dosage is now optional — form should be valid without it
+        params = {
+            "child": self.child.id,
+            "name": "Vitamin D",
+            "time": self.localtime_string(),
+        }
+
+        page = self.c.post("/medication/add/", params, follow=True)
+        self.assertEqual(page.status_code, 200)
+        self.assertContains(
+            page, "Medication entry for {} added".format(str(self.child))
+        )
+
+    def test_form_validation_future_time(self):
+        future_time = timezone.localtime() + timezone.timedelta(hours=1)
+        params = {
+            "child": self.child.id,
+            "name": "Test Medication",
+            "dosage": "5.0",
+            "dosage_unit": "ml",
+            "time": self.localtime_string(future_time),
+        }
+
+        page = self.c.post("/medication/add/", params, follow=True)
+        self.assertEqual(page.status_code, 200)
+        self.assertFormError(
+            page.context["form"], "time", "Date/time can not be in the future."
+        )

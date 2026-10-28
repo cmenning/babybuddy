@@ -8,12 +8,22 @@ from django.utils.translation import gettext as _
 import collections
 
 from core import models
+from core.templatetags.misc import feeding_time_diff_base
 
 register = template.Library()
 
 
 def _hide_empty(context):
     return context["request"].user.settings.dashboard_hide_empty
+
+
+def _can_view(context, model_name):
+    """
+    Whether the user the card is rendered for may view a core model. Cards are
+    included by the dashboard template, which guards the single-model cards;
+    this is for the cards that combine several models in one place.
+    """
+    return context["request"].user.has_perm(f"core.view_{model_name}")
 
 
 def _filter_data_age(context, keyword="end"):
@@ -240,6 +250,7 @@ def card_feeding_last(context, child):
     return {
         "type": "feeding",
         "feeding": instance,
+        "feeding_diff_base": feeding_time_diff_base(context, instance),
         "empty": empty,
         "hide_empty": _hide_empty(context),
     }
@@ -458,7 +469,9 @@ def card_statistics(context, child):
     """
     stats = []
 
-    changes = _diaperchange_statistics(child)
+    changes = (
+        _diaperchange_statistics(child) if _can_view(context, "diaperchange") else None
+    )
     if changes:
         for item in changes:
             stats.append(
@@ -469,7 +482,7 @@ def card_statistics(context, child):
                 }
             )
 
-    feedings = _feeding_statistics(child)
+    feedings = _feeding_statistics(child) if _can_view(context, "feeding") else None
     if feedings:
         for item in feedings:
             stats.append(
@@ -480,7 +493,7 @@ def card_statistics(context, child):
                 }
             )
 
-    naps = _nap_statistics(child)
+    naps = _nap_statistics(child) if _can_view(context, "sleep") else None
     if naps:
         stats.append(
             {
@@ -497,7 +510,7 @@ def card_statistics(context, child):
             }
         )
 
-    sleep = _sleep_statistics(child)
+    sleep = _sleep_statistics(child) if _can_view(context, "sleep") else None
     if sleep:
         stats.append(
             {
@@ -514,7 +527,7 @@ def card_statistics(context, child):
             }
         )
 
-    weight = _weight_statistics(child)
+    weight = _weight_statistics(child) if _can_view(context, "weight") else None
     if weight:
         stats.append(
             {
@@ -524,7 +537,7 @@ def card_statistics(context, child):
             }
         )
 
-    height = _height_statistics(child)
+    height = _height_statistics(child) if _can_view(context, "height") else None
     if height:
         stats.append(
             {
@@ -534,7 +547,11 @@ def card_statistics(context, child):
             }
         )
 
-    head_circumference = _head_circumference_statistics(child)
+    head_circumference = (
+        _head_circumference_statistics(child)
+        if _can_view(context, "headcircumference")
+        else None
+    )
     if head_circumference:
         stats.append(
             {
@@ -544,7 +561,7 @@ def card_statistics(context, child):
             }
         )
 
-    bmi = _bmi_statistics(child)
+    bmi = _bmi_statistics(child) if _can_view(context, "bmi") else None
     if bmi:
         stats.append(
             {
@@ -810,28 +827,6 @@ def _bmi_statistics(child):
     return bmi
 
 
-@register.inclusion_tag("cards/note_recent.html", takes_context=True)
-def card_note_recent(context, child):
-    """
-    Information about recent notes.
-    :param child: an instance of the Child model.
-    :returns: a dictionary with a list of recent Note instances.
-    """
-    instances = list(
-        models.Note.objects.filter(child=child)
-        .filter(**_filter_data_age(context, "time"))
-        .order_by("-time")
-    )
-    empty = len(instances) == 0
-
-    return {
-        "type": "note",
-        "notes": instances,
-        "empty": empty,
-        "hide_empty": _hide_empty(context),
-    }
-
-
 @register.inclusion_tag("cards/timer_list.html", takes_context=True)
 def card_timer_list(context, child=None):
     """
@@ -903,6 +898,48 @@ def card_tummytime_day(context, child, date=None):
         "stats": stats,
         "instances": instances,
         "last": instances.first(),
+        "empty": empty,
+        "hide_empty": _hide_empty(context),
+    }
+
+
+@register.inclusion_tag("cards/medication_last.html", takes_context=True)
+def card_medication_last(context, child):
+    """
+    Information about the most recent medication administration.
+    :param child: an instance of the Child model.
+    :returns: a dictionary with the most recent Medication instance.
+    """
+    instance = (
+        models.Medication.objects.filter(child=child)
+        .filter(**_filter_data_age(context, "time"))
+        .select_related("child")
+        .order_by("-time")
+        .first()
+    )
+
+    return {
+        "type": "medication",
+        "medication": instance,
+        "empty": not instance,
+        "hide_empty": _hide_empty(context),
+    }
+
+
+@register.inclusion_tag("cards/notes_recent.html", takes_context=True)
+def card_notes_recent(context, child):
+    """
+    Recent notes for the child dashboard — shows last 4 notes with
+    time and text so caregivers can see what's been recorded without
+    navigating to the notes list.
+    """
+    recent = models.Note.objects.filter(child=child).order_by("-time")[:4]
+
+    empty = len(recent) == 0
+
+    return {
+        "type": "note",
+        "notes": list(recent),
         "empty": empty,
         "hide_empty": _hide_empty(context),
     }
